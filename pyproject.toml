@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ifrost"                 # must be unique on PyPI!
+version = "0.1.0"
+description = "A package for modelling and processing EMI data"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name="Tyler Casas", email="casast14@students.rowan.edu" }
+]
+requires-python = ">=3.8"
+dependencies = [
+    # put runtime deps here, e.g. "numpy>=1.24"
+]
+
+[project.urls]
+Homepage = "https://github.com/Tyler-42690/ifrost"
+Documentation = "https://github.com/Tyler-42690/ifrost/blob/main/README.md"
+Repository = "https://github.com/Tyler-42690/ifrost"
+Issues = "https://github.com/Tyler-42690/ifrost/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]   # tells setuptools to look inside src/

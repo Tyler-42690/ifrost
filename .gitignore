@@ -416,3 +416,33 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Python virtual environments
+venv/
+.env/
+.venv/
+env/
+ENV/
+
+# Poetry
+.poetry/
+
+# Pipenv
+Pipfile.lock
+
+# Conda
+condaenv/
+
+# Hatch
+.hatch/
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
