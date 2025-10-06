@@ -1,5 +1,7 @@
 import torch
 import scipy.special as sp
+import scipy.integrate as spi
+import numpy as np
 
 torch.set_default_dtype(torch.float64)  # Set precision to 64-bit
 torch.set_default_device("cuda" if torch.cuda.is_available() else "cpu")  # Use GPU if available
@@ -126,3 +128,179 @@ def besselj0_zero(x_zero):
         x_zero = x_zero_new
     return x_zero
 
+# Modified W Transform Functions
+def simpson_rule(f, a, b, num_points):
+    """
+    Simpson's rule integration using num_points equally spaced samples between a and b.
+    num_points should be even for classical Simpson's rule (like MATLAB).
+    """
+    if num_points % 2 == 1:
+        num_points += 1  # ensure even number of intervals
+    x = np.linspace(a, b, num_points + 1)
+    y = np.array([f(xi) for xi in x])
+    return spi.simpson(y, x)
+
+def mw_j1_integral(f):
+    """
+    Compute the integral of f(x) = J1(x) * g(x) from 0 to infinity
+    using the modified W-transform method of Sidi (1988).
+
+    This is used in the Hankel transform for the magnetic field of a circular loop source.
+
+    Parameters
+    ----------
+    f : callable
+        Function handle for the integrand (e.g., f(x) = J1(x) * g(x))
+
+    Returns
+    -------
+    integral_value : float
+        Computed integral value
+    """
+    # =========================================================================
+    num_points = 200        # number of Simpson points between zeros
+    max_iterations = 100    # maximum iterations
+    x_min = 5 * np.pi       # the integral from 0 to x_min is computed directly
+    tolerance = 1e-14
+
+    # -------------------------------------------------------------------------
+    # Generate zeros of J1 using custom root finder
+    x_zeros = np.zeros(max_iterations + 3)
+    x_zeros[0] = besselj1_zero(x_min + np.pi)
+    for i in range(max_iterations + 2):
+        x_zeros[i + 1] = besselj1_zero(x_zeros[i] + np.pi)
+
+    # -------------------------------------------------------------------------
+    # Integral from 0 to x_min
+    integral_initial, _ = spi.quad(f, 0, x_min, epsabs=tolerance)
+
+    # -------------------------------------------------------------------------
+    # Modified W-transform method
+    f0 = simpson_rule(f, x_min, x_zeros[0], num_points)
+    psi_0 = simpson_rule(f, x_zeros[0], x_zeros[1], num_points)
+    psi_1 = simpson_rule(f, x_zeros[1], x_zeros[2], num_points)
+
+    m_0 = f0 / psi_0
+    n_0 = 1 / psi_0
+    f1 = f0 + psi_0
+
+    m_1 = np.zeros(2)
+    n_1 = np.zeros(2)
+    m_1[1] = f1 / psi_1
+    n_1[1] = 1 / psi_1
+    m_1[0] = (m_0 - m_1[1]) / (1 / x_zeros[0] - 1 / x_zeros[1])
+    n_1[0] = (n_0 - n_1[1]) / (1 / x_zeros[0] - 1 / x_zeros[1])
+
+    integral_value = m_1[0] / n_1[0]
+
+    # -------------------------------------------------------------------------
+    stop = False
+    iteration = 2
+    while not stop:
+        iteration += 1
+        psi_prev, m_0, n_0, f0 = psi_1, m_1, n_1, f1
+
+        psi_1 = simpson_rule(f, x_zeros[iteration - 1], x_zeros[iteration], num_points)
+        f1 = f0 + psi_prev
+
+        m_1 = np.zeros(iteration)
+        n_1 = np.zeros(iteration)
+        m_1[iteration - 1] = f1 / psi_1
+        n_1[iteration - 1] = 1 / psi_1
+
+        for k in range(iteration - 2, -1, -1):
+            weight = 1 / x_zeros[k] - 1 / x_zeros[iteration - 1]
+            m_1[k] = (m_0[k] - m_1[k + 1]) / weight
+            n_1[k] = (n_0[k] - n_1[k + 1]) / weight
+
+        integral_new = m_1[0] / n_1[0]
+
+        if abs((integral_new - integral_value) / integral_value) < tolerance or iteration >= max_iterations:
+            stop = True
+
+        integral_value = integral_new
+
+    return integral_value + integral_initial
+
+def mw_j0_integral(f):
+    """
+    Compute the integral of f(x) = J0(x) * g(x) from 0 to infinity
+    using the modified W-transform method of Sidi (1988).
+
+    Parameters
+    ----------
+    f : callable
+        Function handle for the integrand f(x) = J0(x) * g(x)
+
+    Returns
+    -------
+    integral_value : float
+        Computed integral value
+    """
+    # =========================================================================
+    num_points = 200        # number of Simpson points between zeros
+    max_iterations = 100    # maximum iterations
+    x_min = 6 * np.pi
+    tolerance = 1e-8
+
+    # -------------------------------------------------------------------------
+    # Generate zeros of J0 using custom root finder
+    x_zeros = np.zeros(max_iterations + 3)
+    x_zeros[0] = besselj0_zero(x_min + np.pi)
+    for i in range(max_iterations + 2):
+        x_zeros[i + 1] = besselj0_zero(x_zeros[i] + np.pi)
+    x_zeros[0] = besselj0_zero(x_min + np.pi)
+
+    # -------------------------------------------------------------------------
+    # Integral from 0 to x_min
+    integral_inital, _ = spi.quad(f, 0, x_min, epsabs=tolerance)
+
+    # -------------------------------------------------------------------------
+    # Modified W-transform method
+    f0 = simpson_rule(f, x_min, x_zeros[0], num_points)
+    psi_0 = simpson_rule(f, x_zeros[0], x_zeros[1], num_points)
+    psi_1 = simpson_rule(f, x_zeros[1], x_zeros[2], num_points)
+
+    m_0 = f0 / psi_0
+    n_0 = 1 / psi_0
+    f1 = f0 + psi_0
+
+    m_1 = np.zeros(2)
+    n_1 = np.zeros(2)
+    m_1[1] = f1 / psi_1
+    n_1[1] = 1 / psi_1
+    m_1[0] = (m_0 - m_1[1]) / (1 / x_zeros[0] - 1 / x_zeros[1])
+    n_1[0] = (n_0 - n_1[1]) / (1 / x_zeros[0] - 1 / x_zeros[1])
+
+    integral_value = m_1[0] / n_1[0]
+
+    # -------------------------------------------------------------------------
+    stop = False
+    iteration = 2
+    while not stop:
+        iteration += 1
+        psi_0, m_0, n_0, f0 = psi_1, m_1, n_1, f1
+
+        psi_1 = simpson_rule(f, x_zeros[iteration], x_zeros[iteration + 1], num_points)
+        f1 = f0 + psi_0
+
+        m_1 = np.zeros(iteration)
+        n_1 = np.zeros(iteration)
+        m_1[iteration - 1] = f1 / psi_1
+        n_1[iteration - 1] = 1 / psi_1
+
+        for k in range(iteration - 2, -1, -1):
+            weight = 1 / x_zeros[k] - 1 / x_zeros[iteration]
+            m_1[k] = (m_0[k] - m_1[k + 1]) / weight
+            n_1[k] = (n_0[k] - n_1[k + 1]) / weight
+
+        integral_new = m_1[0] / n_1[0]
+
+        if abs((integral_new - integral_value) / integral_value) < tolerance or iteration >= max_iterations:
+            stop = True
+
+        integral_value = integral_new
+
+    return integral_value + integral_inital
+
+# END OF UTILS
