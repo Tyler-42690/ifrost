@@ -1,4 +1,4 @@
-import torch
+import numpy as np
 import scipy.special as sp
 from src.ifrost.models.utils import mw_j0_integral, mw_j1_integral
 
@@ -29,14 +29,14 @@ def rte_function(x, angfreq, permittivity, permeability, conductivity, layer_hei
 
     # Number of layers
     layers = len(permeability)
-    angfreq = angfreq.to(torch.complex128)
+    x = np.asarray(x, dtype=np.complex128)
     # Fundamental constants
-    permeability_0 = 4 * torch.pi * 1e-7   # Henries/meter
+    permeability_0 = 4 * np.pi * 1e-7   # Henries/meter
     permittivity_0 = 8.854e-12          # Farads/meter
 
     # Free-space parameters
     k0_sq = angfreq**2 * permittivity_0 * permeability_0
-    u0 = torch.sqrt(x**2 - k0_sq)
+    u0 = np.sqrt(x**2 - k0_sq)
     z0 = 1j * angfreq * permeability_0
     y0 = u0 / z0  # Intrinsic admittance of free space
 
@@ -44,7 +44,7 @@ def rte_function(x, angfreq, permittivity, permeability, conductivity, layer_hei
     n = layers - 1
     kn_sq = angfreq**2 * permittivity[n] * permeability[n] - 1j * angfreq * conductivity[n] * permeability[n]
     zn = 1j * angfreq * permeability[n]
-    un = torch.sqrt(x**2 - kn_sq)
+    un = np.sqrt(x**2 - kn_sq)
     yn = un / zn
 
     # Initialize Ŷ(layers) = Yn(layers)
@@ -54,10 +54,10 @@ def rte_function(x, angfreq, permittivity, permeability, conductivity, layer_hei
     for n in range(layers - 2, -1, -1):
         kn_sq = angfreq**2 * permittivity[n] * permeability[n] - 1j * angfreq * conductivity[n] * permeability[n]
         zn = 1j * angfreq * permeability[n]
-        un = torch.sqrt(x**2 - kn_sq)
+        un = np.sqrt(x**2 - kn_sq)
         yn = un / zn
 
-        e = torch.exp(-2 * un * layer_height[n])
+        e = np.exp(-2 * un * layer_height[n])
         y_hat = yn * (y_hat * (1 + e) + yn * (1 - e)) / (yn * (1 + e) + y_hat * (1 - e))
 
     # Reflection coefficient for TE mode
@@ -87,16 +87,16 @@ def forward_problem_mag_dipole_hz(angfreq, rho, mag_mom, htx, zrx, permeability,
     =========================================================================
     '''
     scaling_factor = 1
-    angfreq = angfreq.to(torch.complex128)
+    #angfreq = angfreq
     # Fundamental constants (for soil)
-    permeability_0 = 4e-7 * torch.pi  # In Henries/met
+    permeability_0 = 4e-7 * np.pi  # In Henries/met
     permittivity_0 = 8.854e-12  # In Farads/meter
 
     # Necessary constants for calculating rTE
-    k_0 = torch.sqrt(angfreq**2 * permeability_0 * permittivity_0)  # Wavenumber in free space
+    k_0 = np.sqrt(angfreq**2 * permeability_0 * permittivity_0)  # Wavenumber in free space
     
     def u_0(x):
-        return torch.sqrt(x**2 - k_0**2)  # Propagation constant in free space
+        return np.sqrt(x**2 - k_0**2)  # Propagation constant in free space
 
      # Integrand for the modified W-transform method
     def f(x):
@@ -106,11 +106,11 @@ def forward_problem_mag_dipole_hz(angfreq, rho, mag_mom, htx, zrx, permeability,
             / (u_0(x / rho))
             / rho
             * rte_function(x / rho, angfreq, permittivity, permeability, conductivity, layer_height)
-            * torch.exp(u_0(x / rho) * (zrx - htx))
+            * np.exp(u_0(x / rho) * (zrx - htx))
         )
     
     integral = mw_j0_integral(lambda x: f(x) * scaling_factor)
-    return mag_mom/(4*torch.pi)*integral / scaling_factor #Final result
+    return (mag_mom/(4*np.pi)*integral / scaling_factor) #Final result
 
 def forward_problem_mag_dipole_hrho(angfreq, rho, mag_mom, htx, zrx,
                                     permeability, permittivity, conductivity, layer_height):
@@ -120,24 +120,24 @@ def forward_problem_mag_dipole_hrho(angfreq, rho, mag_mom, htx, zrx,
 
     Parameters
     ----------
-    angfreq : torch.Tensor or float
+    angfreq : np.array or float
         Angular frequency.
-    rho : torch.Tensor or float
+    rho : np.array or float
         Horizontal distance from the transmitter to receiver.
-    mag_mom : torch.Tensor or float
+    mag_mom : np.array or float
         Magnetic moment of the transmitter loop.
-    htx : torch.Tensor or float
+    htx : np.array or float
         Height of the transmitter above ground.
-    zrx : torch.Tensor or float
+    zrx : np.array or float
         Height of the receiver above ground.
-    permeability, permittivity, conductivity : list or torch.Tensor
+    permeability, permittivity, conductivity : list or np.array
         Vectors of magnetic permeability, permittivity, and conductivity of each soil layer.
-    layer_height : list or torch.Tensor
+    layer_height : list or np.array
         Vector of the heights of layers (except the deepest one, which is assumed infinite).
 
     Returns
     -------
-    torch.Tensor
+    np.array
         ρ-component of the secondary magnetic field at the receiver (Hρ).
 
     Notes
@@ -148,17 +148,17 @@ def forward_problem_mag_dipole_hrho(angfreq, rho, mag_mom, htx, zrx,
     """
 
     scaling_factor = 1
-    angfreq = angfreq.to(torch.complex128)
+    angfreq = angfreq.to(np.complex128)
 
     # Fundamental constants (soil)
-    permeability_0 = 4e-7 * torch.pi  # Henries/m
+    permeability_0 = 4e-7 * np.pi  # Henries/m
     permittivity_0 = 8.854e-12        # Farads/m
 
     # Free-space wavenumber
-    k_0 = torch.sqrt(angfreq**2 * permeability_0 * permittivity_0)
+    k_0 = np.sqrt(angfreq**2 * permeability_0 * permittivity_0)
 
     def u_0(x):
-        return torch.sqrt(x**2 - k_0**2)
+        return np.sqrt(x**2 - k_0**2)
 
     # Integrand for the modified W-transform
     def f(x):
@@ -166,11 +166,11 @@ def forward_problem_mag_dipole_hrho(angfreq, rho, mag_mom, htx, zrx,
             sp.jv(1, x) *
             ((x / rho) ** 2) / rho *
             rte_function(x / rho, angfreq, permittivity, permeability, conductivity, layer_height) *
-            torch.exp(u_0(x / rho) * (zrx - htx))
+            np.exp(u_0(x / rho) * (zrx - htx))
         )
 
     # Perform integration using modified W-transform for J1
     integral = mw_j1_integral(lambda x: f(x) * scaling_factor)
 
     # Final result
-    return mag_mom / (4 * torch.pi) * integral / scaling_factor
+    return mag_mom / (4 * np.pi) * integral / scaling_factor
