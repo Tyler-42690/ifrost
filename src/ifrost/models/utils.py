@@ -142,6 +142,25 @@ def simpson_rule(f, a, b, num_points):
     y = np.array([f(xi) for xi in x])
     return spi.simpson(y, x)
 
+def simpson_vectorized(y, x):
+    """
+    Vectorized Simpson's rule along last axis.
+    y: shape (num_freqs, num_points)
+    x: shape (num_points,)
+    Returns: array of integrals shape (num_freqs,)
+    """
+    n = x.size
+    if n % 2 == 0:
+        n -= 1
+        x = x[:n]
+        y = y[:, :n]
+
+    h = (x[-1] - x[0]) / (n - 1)
+    w = np.ones(n)
+    w[1:-1:2] = 4
+    w[2:-2:2] = 2
+    return (h/3) * np.sum(y * w[None, :], axis=-1)
+
 def mw_j1_integral(f):
     """
     Compute the integral of f(x) = J1(x) * g(x) from 0 to infinity
@@ -243,7 +262,7 @@ def mw_j0_integral(f):
     num_points = 200        # number of Simpson points between zeros
     max_iterations = 100    # maximum iterations
     x_min = 6 * np.pi
-    tolerance = 1e-8
+    tolerance = 1e-9
 
     # -------------------------------------------------------------------------
     # Generate zeros of J0 using custom root finder
@@ -299,11 +318,110 @@ def mw_j0_integral(f):
 
         integral_new = m_1[0] / n_1[0]
 
-        if abs((integral_new - integral_value) / integral_value) < tolerance or iteration >= max_iterations:
+        if np.abs((integral_new - integral_value) / integral_value) < tolerance or iteration >= max_iterations:
             stop = True
 
         integral_value = integral_new
 
     return integral_value + integral_inital
 
+def mw_j0_integral_vectorized(f_callable, angfreqs,
+                              x_min=6*np.pi, num_points=200, max_iterations=100, tolerance=1e-8):
+    """
+    Vectorized Modified W-transform integration of f(x) = J0(x) * g(x) for multiple frequencies.
+    
+    Parameters
+    ----------
+    f_callable : callable
+        Function of (x, idx) returning complex integrand for frequency idx
+    angfreqs : array-like
+        Angular frequencies, shape (num_freqs,)
+    rho, zrx, htx : float
+        Geometry parameters
+    permittivity, permeability, conductivity, layer_height : arrays
+        Layer properties
+    x_min : float
+        Start of W-transform
+    num_points : int
+        Number of Simpson points per segment
+    max_iterations : int
+        Max W-transform iterations
+    tolerance : float
+        Relative tolerance for convergence
+    
+    Returns
+    -------
+    integral_value : array
+        Computed integral for each frequency, shape (num_freqs,)
+    """
+    num_freqs = len(angfreqs)
+    # Approximate zeros of J0
+    x_zeros = np.zeros(max_iterations + 3)
+    x_zeros[0] = x_min
+    for i in range(max_iterations + 2):
+        x_zeros[i+1] = x_zeros[i] + np.pi
+
+    # -------------------------------------------------------------------------
+    # Helper: vectorized Simpson integration
+    #
+
+    # -------------------------------------------------------------------------
+    # Compute initial integral from 0 to x_min using quad (per frequency)
+    integral_initial = np.zeros(num_freqs, dtype=np.complex128)
+    for i in range(num_freqs):
+        integral_initial[i], _ = spi.quad(lambda x: f_callable(x, i), 0, x_min,
+                                         epsabs=tolerance, complex_func=True)
+
+    # -------------------------------------------------------------------------
+    # Compute segment integrals using vectorized Simpson
+    def compute_segment(x0, x1):
+        x_vals = np.linspace(x0, x1, num_points)
+        y_vals = np.array([f_callable(x_vals, i) for i in range(num_freqs)])
+        return simpson_vectorized(y_vals, x_vals)
+
+    # Initial segments
+    f0 = compute_segment(x_min, x_zeros[0])
+    psi_0 = compute_segment(x_zeros[0], x_zeros[1])
+    psi_1 = compute_segment(x_zeros[1], x_zeros[2])
+
+    m_0 = f0 / psi_0
+    n_0 = 1 / psi_0
+    f1 = f0 + psi_0
+
+    m_1 = np.zeros((num_freqs, 2), dtype=np.complex128)
+    n_1 = np.zeros((num_freqs, 2), dtype=np.complex128)
+    m_1[:,1] = f1 / psi_1
+    n_1[:,1] = 1 / psi_1
+    m_1[:,0] = (m_0 - m_1[:,1]) / (1 / x_zeros[0] - 1 / x_zeros[1])
+    n_1[:,0] = (n_0 - n_1[:,1]) / (1 / x_zeros[0] - 1 / x_zeros[1])
+
+    integral_value = m_1[:,0] / n_1[:,0]
+
+    # -------------------------------------------------------------------------
+    # W-transform iteration
+    stop = np.zeros(num_freqs, dtype=bool)
+    iteration = 2
+
+    while not np.all(stop) and iteration < max_iterations:
+        iteration += 1
+        psi_0, m_0, n_0, f0 = psi_1, m_1.copy(), n_1.copy(), f1.copy()
+        psi_1 = compute_segment(x_zeros[iteration], x_zeros[iteration+1])
+        f1 = f0 + psi_0  # no indexing needed, shape (num_freqs,)
+
+        m_1 = np.zeros((num_freqs, iteration), dtype=np.complex128)
+        n_1 = np.zeros((num_freqs, iteration), dtype=np.complex128)
+        m_1[:, iteration-1] = f1 / psi_1
+        n_1[:, iteration-1] = 1 / psi_1
+
+        for k in range(iteration-2, -1, -1):
+            weight = 1 / x_zeros[k] - 1 / x_zeros[iteration]
+            m_1[:,k] = (m_0[:,k] - m_1[:,k+1]) / weight
+            n_1[:,k] = (n_0[:,k] - n_1[:,k+1]) / weight
+
+        integral_new = m_1[:,0] / n_1[:,0]
+        rel_error = np.abs((integral_new - integral_value)/integral_value)
+        stop = rel_error < tolerance
+        integral_value = integral_new
+
+    return integral_value + integral_initial
 # END OF UTILS

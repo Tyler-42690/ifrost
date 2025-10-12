@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.special as sp
-from src.ifrost.models.utils import mw_j0_integral, mw_j1_integral
+from joblib import Parallel, delayed
+from src.ifrost.models.utils import mw_j0_integral, mw_j1_integral, mw_j0_integral_vectorized
 
 def rte_function(x, angfreq, permittivity, permeability, conductivity, layer_height):
     """
@@ -96,7 +97,7 @@ def forward_problem_mag_dipole_hz(angfreq, rho, mag_mom, htx, zrx, permeability,
     k_0 = np.sqrt(angfreq**2 * permeability_0 * permittivity_0)  # Wavenumber in free space
     
     def u_0(x):
-        return np.sqrt(x**2 - k_0**2)  # Propagation constant in free space
+        return np.sqrt(x**2 - k_0**2+0j)  # Propagation constant in free space with 0j to ensure complex sqrt
 
      # Integrand for the modified W-transform method
     def f(x):
@@ -111,6 +112,88 @@ def forward_problem_mag_dipole_hz(angfreq, rho, mag_mom, htx, zrx, permeability,
     
     integral = mw_j0_integral(lambda x: f(x) * scaling_factor)
     return (mag_mom/(4*np.pi)*integral / scaling_factor) #Final result
+
+'''def forward_problem_mag_dipole_hz_vectorized(
+    angfreq_array, rho, mag_mom, htx, zrx,
+    permeability, permittivity, conductivity, layer_height,
+    x_max=1000, num_points=4000
+):
+    """
+    Fully vectorized computation of Hz for a vertical magnetic dipole
+    over multiple frequencies, using numerical quadrature (trapz).
+    """
+    # Ensure array and complex dtype
+    angfreq_array = np.atleast_1d(angfreq_array).astype(np.complex128)
+
+    # Constants
+    mu0 = 4e-7 * np.pi
+    eps0 = 8.854e-12
+
+    # Quadrature points (Bessel transform variable)
+    x = np.linspace(0, x_max, num_points)
+    dx = x[1] - x[0]
+
+    # Broadcast frequencies over x
+    k0 = np.sqrt(angfreq_array[:, None]**2 * mu0 * eps0)
+    u0 = np.sqrt((x[None, :] / rho)**2 - k0**2 + 0j)
+
+    # Compute rTE per frequency and wavenumber
+    rte_vals = rte_function(
+        x[None, :] / rho,
+        angfreq_array[:, None],
+        permittivity, permeability, conductivity, layer_height
+    )
+
+    # Integrand for all frequencies × x-values
+    f = (
+        sp.jv(0, x)[None, :] *
+        ((x[None, :] / rho)**3) /
+        (u0 * rho) *
+        rte_vals *
+        np.exp(u0 * (zrx - htx))
+    )
+
+    # Numerical integration over x
+    integrals = np.trapezoid(f, x, axis=1)
+
+    # Magnetic field Hz for each frequency
+    Hz = (mag_mom / (4 * np.pi)) * integrals
+
+    return Hz'''
+
+def forward_problem_mag_dipole_hz_vectorized(angfreqs, rho, mag_mom, htx, zrx,
+                                             permeability, permittivity, conductivity, layer_height):
+    '''
+        compute the secondary magnetic field Hz on the air at height zRx from the
+        ground surface. The source is a vertical magnetic dipole
+    Input: 
+        angfreq: angular frequency
+        rho: horizontal distance from the Tx to Rx
+        magMon: magnetic moment, a given constant
+        htx: height of Tx, from the ground
+        zrx: height of Rx, from the ground
+        permeability, permittivity, conductivity: vectors of magnetic permeability, permittivity and conductivity of layered medium. 
+        layerHeight: a vector of the heights of layers, except the deepest layer, which is assumed to be of infinite height.
+
+    Output: 
+        I: z-component of the magnetic field at Rx 
+        Method: use the integral for permeability for Hz (see the book of Ward & Hoffman,
+        eq (4.46)
+    =========================================================================
+    '''
+    mu0 = 4e-7 * np.pi
+    eps0 = 8.854e-12
+    k0 = np.sqrt(angfreqs**2 * mu0 * eps0)
+
+    def integrand(x, idx):
+        u0 = np.sqrt((x/rho)**2 - k0[idx]**2 + 0j)
+        rte = rte_function(x/rho, angfreqs[idx], permittivity, permeability, conductivity, layer_height)
+        return sp.jv(0, x) * ((x/rho)**3) * rte / (u0 * rho) * np.exp(u0 * (zrx - htx))
+
+    integral = mw_j0_integral_vectorized(integrand, angfreqs)
+    Hz = mag_mom / (4*np.pi) * integral
+    return Hz
+
 
 def forward_problem_mag_dipole_hrho(angfreq, rho, mag_mom, htx, zrx,
                                     permeability, permittivity, conductivity, layer_height):
@@ -174,3 +257,30 @@ def forward_problem_mag_dipole_hrho(angfreq, rho, mag_mom, htx, zrx,
 
     # Final result
     return mag_mom / (4 * np.pi) * integral / scaling_factor
+
+def forward_problem_mag_dipole_hz_block_parallel(
+    angfreqs, rho, mag_mom, htx, zrx,
+    permeability, permittivity, conductivity, layer_height,
+    block_size=2, n_jobs=-1
+):
+    """
+    Compute Hz for large frequency arrays using vectorization in blocks
+    and parallel execution across blocks.
+    """
+    # Split angfreqs into blocks
+    blocks = [angfreqs[i:i+block_size] for i in range(0, len(angfreqs), block_size)]
+
+    # Helper to compute one block using vectorized function
+    def compute_block(freq_block):
+        return forward_problem_mag_dipole_hz_vectorized(
+            freq_block, rho, mag_mom, htx, zrx,
+            permeability, permittivity, conductivity, layer_height
+        )
+
+    # Compute all blocks in parallel
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(compute_block)(blk) for blk in blocks
+    )
+
+    # Concatenate all results
+    return np.concatenate(results)
