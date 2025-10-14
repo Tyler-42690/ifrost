@@ -54,10 +54,10 @@ def test_forward_problem_mag_dipole_hz():
     
 
     plt.figure(figsize=(8,6))
-    plt.semilogx(freq, in_phase, '-', label='Measured In-Phase')
-    plt.semilogx(freq, hz_in_phase, '--', label='Model In-Phase')
-    plt.semilogx(freq, quadrature, '-', label='Measured Quadrature')
-    plt.semilogx(freq, hz_quadrature, '--', label='Model Quadrature')
+    plt.semilogx(freq, in_phase, '-', label='MATLAB Model In-Phase')
+    plt.semilogx(freq, hz_in_phase, '--', label='Python Model In-Phase')
+    plt.semilogx(freq, quadrature, '-', label='MATLAB Model Quadrature')
+    plt.semilogx(freq, hz_quadrature, '--', label='Python Model Quadrature')
     plt.xlabel("Frequency (Hz)")
     plt.ylabel("Magnetic Field (A/m)")
     plt.legend()
@@ -110,10 +110,10 @@ def test_forward_problem_mag_dipole_hz_parallel():
     # -------------------------------------------------------------------------
     # Plot comparison
     plt.figure(figsize=(8,6))
-    plt.semilogx(freq, in_phase, '-', label='Measured In-Phase')
-    plt.semilogx(freq, hz_in_phase, '--', label='Model In-Phase')
-    plt.semilogx(freq, quadrature, '-', label='Measured Quadrature')
-    plt.semilogx(freq, hz_quadrature, '--', label='Model Quadrature')
+    plt.semilogx(freq, in_phase, '-', label='MATLAB Model In-Phase')
+    plt.semilogx(freq, hz_in_phase, '--', label='Python Model In-Phase')
+    plt.semilogx(freq, quadrature, '-', label='MATLAB Model Quadrature')
+    plt.semilogx(freq, hz_quadrature, '--', label='Python Model Quadrature')
     plt.xlabel("Frequency (Hz)")
     plt.ylabel("Magnetic Field (A/m)")
     plt.legend()
@@ -162,10 +162,10 @@ def test_forward_problem_mag_dipole_hz_hybrid():
     
 
     plt.figure(figsize=(8,6))
-    plt.semilogx(freq, in_phase, '-', label='Measured In-Phase')
-    plt.semilogx(freq, hz_in_phase, '--', label='Model In-Phase')
-    plt.semilogx(freq, quadrature, '-', label='Measured Quadrature')
-    plt.semilogx(freq, hz_quadrature, '--', label='Model Quadrature')
+    plt.semilogx(freq, in_phase, '-', label='MATLAB Model In-Phase')
+    plt.semilogx(freq, hz_in_phase, '--', label='Python Model In-Phase')
+    plt.semilogx(freq, quadrature, '-', label='MATLAB Model Quadrature')
+    plt.semilogx(freq, hz_quadrature, '--', label='Python Model Quadrature')
     plt.xlabel("Frequency (Hz)")
     plt.ylabel("Magnetic Field (A/m)")
     plt.legend()
@@ -173,6 +173,6 @@ def test_forward_problem_mag_dipole_hz_hybrid():
     plt.show()
 
 if __name__ == "__main__":
-    test_forward_problem_mag_dipole_hz() # Vectorized
+    #test_forward_problem_mag_dipole_hz() # Vectorized
     test_forward_problem_mag_dipole_hz_parallel()   # Parallel
     test_forward_problem_mag_dipole_hz_hybrid() # Hybrid

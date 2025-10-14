@@ -262,7 +262,7 @@ def mw_j0_integral(f):
     num_points = 200        # number of Simpson points between zeros
     max_iterations = 100    # maximum iterations
     x_min = 6 * np.pi
-    tolerance = 1e-9
+    tolerance = 1e-8
 
     # -------------------------------------------------------------------------
     # Generate zeros of J0 using custom root finder
@@ -326,7 +326,7 @@ def mw_j0_integral(f):
     return integral_value + integral_inital
 
 def mw_j0_integral_vectorized(f_callable, angfreqs,
-                              x_min=6*np.pi, num_points=200, max_iterations=100, tolerance=1e-9):
+                              x_min=6*np.pi, num_points=200, max_iterations=100, tolerance=1e-8):
     """
     Vectorized Modified W-transform integration of f(x) = J0(x) * g(x) for multiple frequencies.
     
@@ -429,7 +429,7 @@ def mw_j0_integral_vectorized(f_callable, angfreqs,
 # -----------------------
 # Simpson rule for values y(x) with uniform spacing (Numba)
 # -----------------------
-@njit
+@njit(fastmath=True)
 def simpson_rule_numba_from_values(y, x):
     """
     Simpson's rule using precomputed y values and x grid (1D arrays).
@@ -453,9 +453,9 @@ def simpson_rule_numba_from_values(y, x):
     return s * h / 3.0
 
 # -----------------------
-# Numba-compatible TE reflection coefficient (already provided)
+# Numba-compatible TE reflection coefficient
 # -----------------------
-@njit
+@njit(fastmath=True)
 def rte_function_numba(x, angfreq, permittivity, permeability, conductivity, layer_height):
     """
     Numba-compatible TE reflection coefficient for layered earth.
@@ -504,7 +504,14 @@ def rte_function_numba(x, angfreq, permittivity, permeability, conductivity, lay
 # -----------------------
 # Integrand (top-level) for a given x scalar and frequency w
 # -----------------------
-@njit
+@njit(fastmath=True)
+def j0_approx(x):
+    if x < 8.0:
+        xx = x * x
+        return 1 - xx/4 + xx*xx/64 - (xx**3)/2304
+    else:
+        return np.sqrt(2/(np.pi*x)) * np.cos(x - np.pi/4)
+@njit(fastmath=True)
 def integrand_numba_scalar(x, w, rho, htx, zrx,
                            permittivity, permeability, conductivity, layer_height):
     """
@@ -529,14 +536,14 @@ def integrand_numba_scalar(x, w, rho, htx, zrx,
     # j0: use scipy.special.j0 on Python side is not allowed in njit; but many Numba builds support sp.j0.
     # We call np.where fallback if j0 unavailable — here we attempt to call scipy.special.j0 via Python function call,
     # but inside njit it may or may not work depending on Numba version. If that fails, precompute outside.
-    j0x = sp.jv(0,x)  # many setups allow this in njit; if your Numba complains, precompute j0 table outside
+    j0x = j0_approx(x)  # many setups allow this in njit; if your Numba complains, precompute j0 table outside
 
     return j0x * ( (x / rho)**3 ) / (u0 * rho) * r_te * np.exp(u0 * (zrx - htx))
 
 # -----------------------
 # Numba W-transform that takes frequency scalar w and all params (no nested functions)
 # -----------------------
-@njit
+@njit(fastmath=True)
 def mw_j0_integral_numba_scalar_w(w, rho, htx, zrx,
                                   permittivity, permeability, conductivity, layer_height,
                                   x_min=6*np.pi, num_points=200, max_iterations=100, tolerance=1e-9):
