@@ -1,7 +1,8 @@
 import numpy as np
 import scipy.special as sp
 from joblib import Parallel, delayed
-from src.ifrost.models.utils import mw_j0_integral, mw_j1_integral, mw_j0_integral_vectorized
+from numba import njit
+from src.ifrost.models.utils import mw_j0_integral, mw_j1_integral, mw_j0_integral_vectorized, mw_j0_integral_numba_scalar_w
 
 def rte_function(x, angfreq, permittivity, permeability, conductivity, layer_height):
     """
@@ -65,6 +66,226 @@ def rte_function(x, angfreq, permittivity, permeability, conductivity, layer_hei
     r_transverse_electric = (y0 - y_hat) / (y0 + y_hat)
     return r_transverse_electric
 
+@njit
+def rte_function_numba(x, angfreq, permittivity, permeability, conductivity, layer_height):
+    """
+    Numba-compatible TE reflection coefficient for layered earth.
+    
+    Parameters
+    ----------
+    x : ndarray (Nx,)
+        Wavenumber samples divided by rho
+    angfreq : float
+        Single angular frequency
+    permittivity : ndarray (Nlayer,)
+    permeability : ndarray (Nlayer,)
+    conductivity : ndarray (Nlayer,)
+    layer_height : ndarray (Nlayer-1,)
+    
+    Returns
+    -------
+    r_te : ndarray (Nx,)
+        TE reflection coefficient for all x at this frequency
+    """
+    mu0 = 4 * np.pi * 1e-7
+    eps0 = 8.854e-12
+    Nx = len(x)
+    Nlayer = len(permeability)
+    
+    r_te = np.empty(Nx, dtype=np.complex128)
+    
+    for i in range(Nx):
+        xi = x[i]
+        k0_sq = (angfreq**2) * mu0 * eps0
+        u0 = np.sqrt(xi**2 - k0_sq + 0j)
+        y0 = u0 / (1j * angfreq * mu0)
+        
+        # Bottom layer
+        n = Nlayer - 1
+        kn_sq = (angfreq**2 * permittivity[n] * permeability[n]
+                 - 1j * angfreq * conductivity[n] * permeability[n])
+        un = np.sqrt(xi**2 - kn_sq + 0j)
+        yn = un / (1j * angfreq * permeability[n])
+        
+        y_hat = yn
+        
+        # Upward recursion
+        for n in range(Nlayer - 2, -1, -1):
+            kn_sq = (angfreq**2 * permittivity[n] * permeability[n]
+                     - 1j * angfreq * conductivity[n] * permeability[n])
+            un = np.sqrt(xi**2 - kn_sq + 0j)
+            yn = un / (1j * angfreq * permeability[n])
+            
+            e = np.exp(-2 * un * layer_height[n])
+            
+            num = y_hat * (1.0 + e) + yn * (1.0 - e)
+            den = yn * (1.0 + e) + y_hat * (1.0 - e)
+            y_hat = yn * (num / den)
+        
+        # TE reflection coefficient
+        r_te[i] = (y0 - y_hat) / (y0 + y_hat)
+    
+    return r_te
+
+# -------------------------------------------------------------------------
+# Numba-compatible Simpson integration
+@njit
+def simpson_numba(y, x):
+    """
+    Simpson's rule for 1D arrays.
+    """
+    N = len(x)
+    if N < 2:
+        return 0.0 + 0.0j
+    if N % 2 == 0:
+        N -= 1  # make odd number of points
+    h = (x[N-1] - x[0]) / (N-1)
+    s = y[0] + y[N-1]
+    for i in range(1, N-1, 2):
+        s += 4.0 * y[i]
+    for i in range(2, N-2, 2):
+        s += 2.0 * y[i]
+    return s * h / 3.0
+
+# -------------------------------------------------------------------------
+@njit
+def integrand_numba(x, w, rho, htx, zrx, permittivity, permeability, conductivity, layer_height):
+    mu0 = 4*np.pi*1e-7
+    eps0 = 8.854e-12
+    u0 = np.sqrt((x / rho)**2 - w**2 * mu0 * eps0 + 0j)
+    r_te = rte_function_numba(np.array([x / rho]), w, permittivity, permeability, conductivity, layer_height)[0]
+    return sp.jv(0, x) * ((x / rho)**3) / (u0 * rho) * r_te * np.exp(u0 * (zrx - htx))
+# ------------------------ Numba JIT Forward Solver ------------------------
+# -----------------------
+# Final Numba JIT forward function (parallel over frequencies)
+# -----------------------
+@njit(parallel=True)
+def forward_problem_mag_dipole_hz_numba(
+    angfreqs, rho, mag_mom, htx, zrx,
+    permittivity, permeability, conductivity, layer_height,
+    x_min=6*np.pi, num_points=200, max_iterations=100
+):
+    """
+    Parallel Numba implementation using the modified W-transform per frequency.
+    """
+    Nfreq = len(angfreqs)
+    Hz = np.empty(Nfreq, dtype=np.complex128)
+
+    for fi in range(Nfreq):
+        w = angfreqs[fi]
+        val = mw_j0_integral_numba_scalar_w(
+            w, rho, htx, zrx,
+            permittivity, permeability, conductivity, layer_height,
+            x_min, num_points, max_iterations, 1e-9
+        )
+        Hz[fi] = mag_mom / (4.0 * np.pi) * val
+
+    return Hz
+
+
+# def rte_function_vectorized(x, angfreq, permittivity, permeability, conductivity, layer_height):
+#     """
+#     Vectorized Transverse Electric reflection coefficient (Ward & Hohmann, Eq. 4.19).
+#     Supports x as an array (e.g., for numerical integration) and multiple layers.
+#     """
+#     x = np.atleast_1d(x).astype(np.complex128)
+#     permittivity = np.asarray(permittivity, dtype=np.float64)
+#     permeability = np.asarray(permeability, dtype=np.float64)
+#     conductivity = np.asarray(conductivity, dtype=np.float64)
+#     layer_height = np.asarray(layer_height, dtype=np.float64)
+
+#     mu0 = 4 * np.pi * 1e-7
+#     eps0 = 8.854e-12
+#     k0_sq = angfreq**2 * mu0 * eps0
+#     z0 = 1j * angfreq * mu0
+
+#     # Compute per-layer propagation constants and admittances
+#     kn_sq = (angfreq**2 * np.outer(np.ones_like(x), permittivity * permeability)
+#              - 1j * angfreq * np.outer(np.ones_like(x), conductivity * permeability))
+#     u = np.sqrt(x[:, None]**2 - kn_sq+0j)
+#     z = 1j * angfreq * permeability
+#     y = u / z
+
+#     # Upward recursion (vectorized over x)
+#     y_hat = y[:, -1].copy()
+#     for n in range(len(permeability) - 2, -1, -1):
+#         e = np.exp(-2 * u[:, n] * layer_height[n])
+#         y_hat = y[:, n] * (y_hat * (1 + e) + y[:, n] * (1 - e)) / (y[:, n] * (1 + e) + y_hat * (1 - e))
+
+#     # Reflection coefficient
+#     u0 = np.sqrt(x**2 - k0_sq)
+#     y0 = u0 / z0
+#     return (y0 - y_hat) / (y0 + y_hat)
+
+def rte_function_vectorized(x, angfreq, permittivity, permeability, conductivity, layer_height):
+    """
+    Fully vectorized Transverse Electric reflection coefficient (Ward & Hohmann, Eq. 4.19).
+
+    Parameters
+    ----------
+    x : ndarray (Nx, Nfreq)
+        Wavenumber domain samples divided by rho.
+    angfreq : ndarray (Nx, Nfreq)
+        Angular frequencies (broadcasted with x).
+    permittivity : array_like (Nlayer,)
+        Layer permittivity values.
+    permeability : array_like (Nlayer,)
+        Layer permeability values.
+    conductivity : array_like (Nlayer,)
+        Layer conductivity values.
+    layer_height : array_like (Nlayer-1,)
+        Layer thicknesses (last layer infinite).
+
+    Returns
+    -------
+    r_transverse_electric : ndarray (Nx, Nfreq)
+        Complex TE reflection coefficients for all x, ω.
+    """
+    # -------------------------------------------------------------------------
+    # Constants
+    mu0 = 4 * np.pi * 1e-7
+    eps0 = 8.854e-12
+
+    # -------------------------------------------------------------------------
+    # Free-space parameters (broadcasted)
+    k0_sq = angfreq**2 * mu0 * eps0
+    u0 = np.sqrt(x**2 - k0_sq + 0j)
+    y0 = u0 / (1j * angfreq * mu0)  # admittance of free space
+
+    # -------------------------------------------------------------------------
+    # Bottom layer initialization (layer N)
+    Nlayer = len(permeability)
+    n = Nlayer - 1
+
+    kn_sq = (angfreq**2 * permittivity[n] * permeability[n]
+             - 1j * angfreq * conductivity[n] * permeability[n])
+    un = np.sqrt(x**2 - kn_sq + 0j)
+    yn = un / (1j * angfreq * permeability[n])
+
+    # Initialize upward recursion
+    y_hat = yn
+
+    # -------------------------------------------------------------------------
+    # Recursive upward reflection combination for all layers
+    for n in range(Nlayer - 2, -1, -1):
+        kn_sq = (angfreq**2 * permittivity[n] * permeability[n]
+                 - 1j * angfreq * conductivity[n] * permeability[n])
+        un = np.sqrt(x**2 - kn_sq + 0j)
+        yn = un / (1j * angfreq * permeability[n])
+
+        # Exponential term, fully broadcasted
+        e = np.exp(-2 * un * layer_height[n])
+
+        # Recursive impedance combination, vectorized
+        num = y_hat * (1 + e) + yn * (1 - e)
+        den = yn * (1 + e) + y_hat * (1 - e)
+        y_hat = yn * (num / den)
+
+    # -------------------------------------------------------------------------
+    # Final TE reflection coefficient (vectorized over x, ω)
+    r_transverse_electric = (y0 - y_hat) / (y0 + y_hat)
+    return r_transverse_electric
+
 
 def forward_problem_mag_dipole_hz(angfreq, rho, mag_mom, htx, zrx, permeability, 
                                   permittivity, conductivity, layer_height):
@@ -113,57 +334,11 @@ def forward_problem_mag_dipole_hz(angfreq, rho, mag_mom, htx, zrx, permeability,
     integral = mw_j0_integral(lambda x: f(x) * scaling_factor)
     return (mag_mom/(4*np.pi)*integral / scaling_factor) #Final result
 
-'''def forward_problem_mag_dipole_hz_vectorized(
-    angfreq_array, rho, mag_mom, htx, zrx,
-    permeability, permittivity, conductivity, layer_height,
-    x_max=1000, num_points=4000
-):
-    """
-    Fully vectorized computation of Hz for a vertical magnetic dipole
-    over multiple frequencies, using numerical quadrature (trapz).
-    """
-    # Ensure array and complex dtype
-    angfreq_array = np.atleast_1d(angfreq_array).astype(np.complex128)
 
-    # Constants
-    mu0 = 4e-7 * np.pi
-    eps0 = 8.854e-12
-
-    # Quadrature points (Bessel transform variable)
-    x = np.linspace(0, x_max, num_points)
-    dx = x[1] - x[0]
-
-    # Broadcast frequencies over x
-    k0 = np.sqrt(angfreq_array[:, None]**2 * mu0 * eps0)
-    u0 = np.sqrt((x[None, :] / rho)**2 - k0**2 + 0j)
-
-    # Compute rTE per frequency and wavenumber
-    rte_vals = rte_function(
-        x[None, :] / rho,
-        angfreq_array[:, None],
-        permittivity, permeability, conductivity, layer_height
-    )
-
-    # Integrand for all frequencies × x-values
-    f = (
-        sp.jv(0, x)[None, :] *
-        ((x[None, :] / rho)**3) /
-        (u0 * rho) *
-        rte_vals *
-        np.exp(u0 * (zrx - htx))
-    )
-
-    # Numerical integration over x
-    integrals = np.trapezoid(f, x, axis=1)
-
-    # Magnetic field Hz for each frequency
-    Hz = (mag_mom / (4 * np.pi)) * integrals
-
-    return Hz'''
 
 def forward_problem_mag_dipole_hz_vectorized(angfreqs, rho, mag_mom, htx, zrx,
                                              permeability, permittivity, conductivity, layer_height):
-    '''
+    ''' 
         compute the secondary magnetic field Hz on the air at height zRx from the
         ground surface. The source is a vertical magnetic dipole
     Input: 
@@ -187,12 +362,76 @@ def forward_problem_mag_dipole_hz_vectorized(angfreqs, rho, mag_mom, htx, zrx,
 
     def integrand(x, idx):
         u0 = np.sqrt((x/rho)**2 - k0[idx]**2 + 0j)
-        rte = rte_function(x/rho, angfreqs[idx], permittivity, permeability, conductivity, layer_height)
+        rte = rte_function_vectorized(x/rho, angfreqs[idx], permittivity, permeability, conductivity, layer_height)
         return sp.jv(0, x) * ((x/rho)**3) * rte / (u0 * rho) * np.exp(u0 * (zrx - htx))
 
     integral = mw_j0_integral_vectorized(integrand, angfreqs)
     Hz = mag_mom / (4*np.pi) * integral
     return Hz
+
+# def forward_problem_mag_dipole_hz_vectorized(angfreqs, rho, mag_mom, htx, zrx,
+#                                              permeability, permittivity, conductivity, layer_height):
+#     """
+#     Fully vectorized forward model for vertical magnetic dipole (Hz component)
+#     using precomputed integrand and vectorized W-transform.
+    
+#     Parameters
+#     ----------
+#     angfreqs : array_like, shape (Nfreq,)
+#         Angular frequencies
+#     rho : float
+#         Horizontal distance from Tx to Rx
+#     mag_mom : float
+#         Magnetic moment of dipole
+#     htx : float
+#         Height of Tx above ground
+#     zrx : float
+#         Height of Rx above ground
+#     permeability, permittivity, conductivity, layer_height : arrays
+#         Layer properties (1D arrays)
+    
+#     Returns
+#     -------
+#     Hz : ndarray, shape (Nfreq,)
+#         Secondary magnetic field at Rx for each frequency
+#     """
+#     mu0 = 4 * np.pi * 1e-7
+#     eps0 = 8.854e-12
+
+#     angfreqs = np.atleast_1d(angfreqs)
+#     Nfreq = len(angfreqs)
+
+#     # ---------------------------------------------------------------------
+#     # Wavenumber sampling
+#     Nx = 512
+#     x_vals = np.linspace(0, 20, Nx)
+
+#     # Broadcasted mesh for x and frequency
+#     X, OMEGA = np.meshgrid(x_vals / rho, angfreqs, indexing='ij')  # shape (Nx, Nfreq)
+
+#     # Free-space propagation constant
+#     u0 = np.sqrt(X**2 - (OMEGA**2 * mu0 * eps0) + 0j)
+
+#     # ---------------------------------------------------------------------
+#     # Compute TE reflection coefficients (vectorized over x)
+#     rte = np.zeros_like(X, dtype=np.complex128)
+#     for i in range(Nfreq):
+#         rte[:, i] = rte_function_vectorized(X[:, i], angfreqs[i], permittivity, permeability,
+#                                             conductivity, layer_height)
+
+#     # ---------------------------------------------------------------------
+#     # Compute integrand for Hz
+#     integrand = sp.jv(0, x_vals)[:, None] * (X**3) * rte / (u0 * rho) * np.exp(u0 * (zrx - htx))
+
+#     # ---------------------------------------------------------------------
+#     # Integrate along x using vectorized W-transform
+#     integral = mw_j0_integral_vectorized(integrand, angfreqs)
+
+#     # ---------------------------------------------------------------------
+#     # Final Hz field
+#     Hz = mag_mom / (4 * np.pi) * integral
+#     return Hz
+
 
 
 def forward_problem_mag_dipole_hrho(angfreq, rho, mag_mom, htx, zrx,
@@ -278,7 +517,7 @@ def forward_problem_mag_dipole_hz_block_parallel(
         )
 
     # Compute all blocks in parallel
-    results = Parallel(n_jobs=n_jobs)(
+    results = Parallel(n_jobs=n_jobs, backend='loky')(
         delayed(compute_block)(blk) for blk in blocks
     )
 

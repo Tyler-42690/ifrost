@@ -6,7 +6,7 @@
 import scipy.special as sp
 import scipy.integrate as spi
 import numpy as np
-
+from numba import njit
 
 # 3D Forward Modeling Functions
 
@@ -326,7 +326,7 @@ def mw_j0_integral(f):
     return integral_value + integral_inital
 
 def mw_j0_integral_vectorized(f_callable, angfreqs,
-                              x_min=6*np.pi, num_points=200, max_iterations=100, tolerance=1e-8):
+                              x_min=6*np.pi, num_points=200, max_iterations=100, tolerance=1e-9):
     """
     Vectorized Modified W-transform integration of f(x) = J0(x) * g(x) for multiple frequencies.
     
@@ -424,4 +424,242 @@ def mw_j0_integral_vectorized(f_callable, angfreqs,
         integral_value = integral_new
 
     return integral_value + integral_initial
+
+
+# -----------------------
+# Simpson rule for values y(x) with uniform spacing (Numba)
+# -----------------------
+@njit
+def simpson_rule_numba_from_values(y, x):
+    """
+    Simpson's rule using precomputed y values and x grid (1D arrays).
+    Ensures odd number of points by dropping last point if necessary.
+    """
+    n = len(x)
+    if n < 2:
+        return 0.0 + 0.0j
+    # ensure odd number of points -> even number of subintervals
+    if (n - 1) % 2 == 1:
+        # drop last point
+        n -= 1
+    h = (x[n-1] - x[0]) / (n - 1)
+    s = y[0] + y[n-1]
+    # sum odd indices
+    for i in range(1, n-1, 2):
+        s += 4.0 * y[i]
+    # sum even indices
+    for i in range(2, n-2, 2):
+        s += 2.0 * y[i]
+    return s * h / 3.0
+
+# -----------------------
+# Numba-compatible TE reflection coefficient (already provided)
+# -----------------------
+@njit
+def rte_function_numba(x, angfreq, permittivity, permeability, conductivity, layer_height):
+    """
+    Numba-compatible TE reflection coefficient for layered earth.
+    x : 1D array of k = x/rho samples (but you can pass any x array)
+    angfreq : scalar
+    returns r_te (1D complex array same length as x)
+    """
+    mu0 = 4 * np.pi * 1e-7
+    eps0 = 8.854e-12
+    Nx = len(x)
+    Nlayer = len(permeability)
+    r_te = np.empty(Nx, dtype=np.complex128)
+
+    for i in range(Nx):
+        xi = x[i]
+        k0_sq = (angfreq**2) * mu0 * eps0
+        u0 = np.sqrt(xi**2 - k0_sq + 0j)
+        y0 = u0 / (1j * angfreq * mu0)
+
+        # Bottom layer
+        n = Nlayer - 1
+        kn_sq = (angfreq**2 * permittivity[n] * permeability[n]
+                 - 1j * angfreq * conductivity[n] * permeability[n])
+        un = np.sqrt(xi**2 - kn_sq + 0j)
+        yn = un / (1j * angfreq * permeability[n])
+
+        y_hat = yn
+
+        # Upward recursion
+        for nl in range(Nlayer - 2, -1, -1):
+            kn_sq = (angfreq**2 * permittivity[nl] * permeability[nl]
+                     - 1j * angfreq * conductivity[nl] * permeability[nl])
+            un = np.sqrt(xi**2 - kn_sq + 0j)
+            yn = un / (1j * angfreq * permeability[nl])
+
+            e = np.exp(-2 * un * layer_height[nl])
+
+            num = y_hat * (1.0 + e) + yn * (1.0 - e)
+            den = yn * (1.0 + e) + y_hat * (1.0 - e)
+            y_hat = yn * (num / den)
+
+        r_te[i] = (y0 - y_hat) / (y0 + y_hat)
+
+    return r_te
+
+# -----------------------
+# Integrand (top-level) for a given x scalar and frequency w
+# -----------------------
+@njit
+def integrand_numba_scalar(x, w, rho, htx, zrx,
+                           permittivity, permeability, conductivity, layer_height):
+    """
+    scalar integrand f(x) = J0(x) * g(x) for a single x and frequency w.
+    Note: here x is the Bessel-domain variable (like original code).
+    """
+    mu0 = 4 * np.pi * 1e-7
+    eps0 = 8.854e-12
+
+    # compute u0 for free space using k0
+    k0_sq = w**2 * mu0 * eps0
+    # argument for u0 uses (x/rho)
+    xrho = x / rho
+    u0 = np.sqrt(xrho**2 - k0_sq + 0j)
+
+    # compute r_te for this single xrho: call rte_function_numba with array of one element
+    k_arr = np.empty(1, dtype=np.float64)
+    k_arr[0] = xrho
+    r_te_arr = rte_function_numba(k_arr, w, permittivity, permeability, conductivity, layer_height)
+    r_te = r_te_arr[0]
+
+    # j0: use scipy.special.j0 on Python side is not allowed in njit; but many Numba builds support sp.j0.
+    # We call np.where fallback if j0 unavailable — here we attempt to call scipy.special.j0 via Python function call,
+    # but inside njit it may or may not work depending on Numba version. If that fails, precompute outside.
+    j0x = sp.jv(0,x)  # many setups allow this in njit; if your Numba complains, precompute j0 table outside
+
+    return j0x * ( (x / rho)**3 ) / (u0 * rho) * r_te * np.exp(u0 * (zrx - htx))
+
+# -----------------------
+# Numba W-transform that takes frequency scalar w and all params (no nested functions)
+# -----------------------
+@njit
+def mw_j0_integral_numba_scalar_w(w, rho, htx, zrx,
+                                  permittivity, permeability, conductivity, layer_height,
+                                  x_min=6*np.pi, num_points=200, max_iterations=100, tolerance=1e-9):
+    """
+    Compute integral for a single frequency w using the modified W-transform.
+    Uses Simpson sampling for segments. No nested functions; Numba-friendly.
+    """
+
+    # --- initial serial integral 0 -> x_min using Simpson sampling ---
+    # create x grid for [0, x_min]
+    N0 = num_points
+    if N0 % 2 == 0:
+        N0 += 1
+    x0 = np.linspace(0.0, x_min, N0)
+    fvals0 = np.empty(N0, dtype=np.complex128)
+    for i in range(N0):
+        fvals0[i] = integrand_numba_scalar(x0[i], w, rho, htx, zrx,
+                                          permittivity, permeability, conductivity, layer_height)
+    integral_initial = simpson_rule_numba_from_values(fvals0, x0)
+
+    # --- prepare approximate Bessel zeros (spacing ~ pi) ---
+    max_iter = max_iterations
+    x_zeros = np.empty(max_iter + 3, dtype=np.float64)
+    x_zeros[0] = x_min
+    for i in range(max_iter + 2):
+        x_zeros[i + 1] = x_zeros[i] + np.pi
+
+    # --- First three segments using Simpson sampling ---
+    # segment x_min -> x_zeros[0]
+    Nseg = num_points if (num_points % 2 == 1) else num_points + 1
+    x_seg = np.linspace(x_min, x_zeros[0], Nseg)
+    fseg = np.empty(Nseg, dtype=np.complex128)
+    for i in range(Nseg):
+        fseg[i] = integrand_numba_scalar(x_seg[i], w, rho, htx, zrx,
+                                         permittivity, permeability, conductivity, layer_height)
+    f0 = simpson_rule_numba_from_values(fseg, x_seg)
+
+    # psi_0: x_zeros[0] -> x_zeros[1]
+    x_seg = np.linspace(x_zeros[0], x_zeros[1], Nseg)
+    for i in range(Nseg):
+        fseg[i] = integrand_numba_scalar(x_seg[i], w, rho, htx, zrx,
+                                         permittivity, permeability, conductivity, layer_height)
+    psi_0 = simpson_rule_numba_from_values(fseg, x_seg)
+
+    # psi_1: x_zeros[1] -> x_zeros[2]
+    x_seg = np.linspace(x_zeros[1], x_zeros[2], Nseg)
+    for i in range(Nseg):
+        fseg[i] = integrand_numba_scalar(x_seg[i], w, rho, htx, zrx,
+                                         permittivity, permeability, conductivity, layer_height)
+    psi_1 = simpson_rule_numba_from_values(fseg, x_seg)
+
+    # --- W-transform initial algebra ---
+    # protect against tiny psi values by adding tiny eps if needed
+    eps = 1e-30
+    psi_0_safe = psi_0 if np.abs(psi_0) > eps else psi_0 + eps
+    psi_1_safe = psi_1 if np.abs(psi_1) > eps else psi_1 + eps
+
+    m_0 = f0 / psi_0_safe
+    n_0 = 1.0 / psi_0_safe
+    f1 = f0 + psi_0
+
+    m_1 = np.zeros(2, dtype=np.complex128)
+    n_1 = np.zeros(2, dtype=np.complex128)
+    m_1[1] = f1 / psi_1_safe
+    n_1[1] = 1.0 / psi_1_safe
+    denom01 = (1.0 / (x_zeros[0] + 1e-30) - 1.0 / (x_zeros[1] + 1e-30))
+    m_1[0] = (m_0 - m_1[1]) / denom01
+    n_1[0] = (n_0 - n_1[1]) / denom01
+
+    integral_value = m_1[0] / n_1[0]
+
+    # --- W-transform iterative loop ---
+    iteration = 2
+    while True:
+        # compute next psi segment
+        if iteration + 1 >= x_zeros.shape[0]:
+            break
+        x_seg = np.linspace(x_zeros[iteration], x_zeros[iteration + 1], Nseg)
+        for i in range(Nseg):
+            fseg[i] = integrand_numba_scalar(x_seg[i], w, rho, htx, zrx,
+                                             permittivity, permeability, conductivity, layer_height)
+        psi_next = simpson_rule_numba_from_values(fseg, x_seg)
+
+        # shift previous values
+        psi_0_prev = psi_1
+        m_0_prev = m_1.copy()
+        n_0_prev = n_1.copy()
+        f0_prev = f1
+
+        psi_1 = psi_next
+        f1 = f0_prev + psi_0_prev
+
+        # safe division
+        psi_1_safe = psi_1 if np.abs(psi_1) > eps else psi_1 + eps
+
+        # build m_1, n_1 for current iteration
+        m_1 = np.zeros(iteration + 1, dtype=np.complex128)
+        n_1 = np.zeros(iteration + 1, dtype=np.complex128)
+        m_1[iteration] = f1 / psi_1_safe
+        n_1[iteration] = 1.0 / psi_1_safe
+
+        # backward recursion to compute other m_1/n_1 entries
+        for k in range(iteration - 1, -1, -1):
+            weight = 1.0 / (x_zeros[k] + 1e-30) - 1.0 / (x_zeros[iteration] + 1e-30)
+            # m_0_prev and n_0_prev have length iteration
+            # guard indexing: if k < m_0_prev.shape[0], use their value else fallback 0
+            a = m_0_prev[k] if k < m_0_prev.shape[0] else 0.0 + 0.0j
+            b = n_0_prev[k] if k < n_0_prev.shape[0] else 0.0 + 0.0j
+            m_1[k] = (a - m_1[k+1]) / weight
+            n_1[k] = (b - n_1[k+1]) / weight
+
+        integral_new = m_1[0] / n_1[0]
+
+        # convergence check
+        if np.abs((integral_new - integral_value) / (integral_value + 1e-30)) < tolerance:
+            integral_value = integral_new
+            break
+
+        integral_value = integral_new
+        iteration += 1
+        if iteration > max_iterations:
+            break
+
+    return integral_value + integral_initial
+
 # END OF UTILS

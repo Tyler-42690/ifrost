@@ -35,11 +35,11 @@ def test_forward_problem_mag_dipole_hz():
 
     # Compare with using all frequencies at once
     time_start = time.time()
-    hz_sim = one.forward_problem_mag_dipole_hz_vectorized(
+    hz_sim = one.forward_problem_mag_dipole_hz_numba(
         angfreqs, rho, mag_mom, htx, zrx, permeability, permittivity, conductivity, layer_height
     )
     time_end = time.time()
-    print(f"Vectorized computation time: {time_end - time_start:.4f} seconds")
+    print(f"JIT computation time: {time_end - time_start:.4f} seconds")
     
     # Load reference data for comparison (3layerver.xlsx) - precomputed results
     df = pd.read_excel('src/ifrost/models/3layerver.xlsx')
@@ -88,7 +88,7 @@ def test_forward_problem_mag_dipole_hz_parallel():
     # -------------------------------------------------------------------------
     # Parallel computation of Hz for each frequency
     time_start = time.time()
-    hz_parallel = Parallel(n_jobs=-1)(
+    hz_parallel = Parallel(n_jobs=-1,backend="loky")(
         delayed(one.forward_problem_mag_dipole_hz)(
             freq, rho, mag_mom, htx, zrx, permeability, permittivity, conductivity, layer_height
         ) for freq in angfreqs
